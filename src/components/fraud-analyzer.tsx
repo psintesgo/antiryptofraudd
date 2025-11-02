@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -31,12 +31,12 @@ const formSchema = z.object({
 type FormValues = z.infer<typeof formSchema>;
 
 const fileToDataUri = (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = reject;
-      reader.readAsDataURL(file);
-    });
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
 };
 
 export default function FraudAnalyzer() {
@@ -50,7 +50,12 @@ export default function FraudAnalyzer() {
     finalReport: null,
     error: null,
   });
+
   const [filePreview, setFilePreview] = useState<string | null>(null);
+
+  // Drag & Drop state
+  const [dragActive, setDragActive] = useState(false);
+  const dragCounter = useRef(0);
 
   const { toast } = useToast();
   const { t, language } = useI18n();
@@ -72,10 +77,10 @@ export default function FraudAnalyzer() {
     let urlAnalysis = '';
     
     try {
-      const analysisPromises = [];
+      const analysisTasks: Array<() => Promise<void>> = [];
 
       if (data.mediaFile) {
-        analysisPromises.push(async () => {
+        analysisTasks.push(async () => {
           const dataUri = await fileToDataUri(data.mediaFile!);
           if (data.mediaFile!.type.startsWith('image/')) {
             const result = await analyzeImageForFraud({ photoDataUri: dataUri });
@@ -88,13 +93,13 @@ export default function FraudAnalyzer() {
       }
       
       if (data.url) {
-        analysisPromises.push(async () => {
+        analysisTasks.push(async () => {
           const result = await investigateURLForFraud({ url: data.url! });
           urlAnalysis = result.analysis;
         });
       }
 
-      await Promise.all(analysisPromises.map(p => p()));
+      await Promise.all(analysisTasks.map(run => run()));
       
       const report = await generateFraudReport({ imageAnalysis, urlAnalysis, language });
       setAnalysisState(prev => ({ ...prev, finalReport: report }));
@@ -113,24 +118,59 @@ export default function FraudAnalyzer() {
     }
   };
 
+  const processFile = (file: File) => {
+    if (file.type.startsWith("image/") || file.type.startsWith("video/")) {
+      setValue("mediaFile", file, { shouldValidate: true });
+      if (file.type.startsWith("image/")) {
+        setFilePreview(URL.createObjectURL(file));
+      } else {
+        setFilePreview(null);
+      }
+    } else {
+      toast({
+        variant: "destructive",
+        title: "Invalid File Type",
+        description: "Please upload an image or video file.",
+      });
+    }
+  };
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      if (file.type.startsWith("image/") || file.type.startsWith("video/")) {
-        setValue("mediaFile", file, { shouldValidate: true });
-        if (file.type.startsWith("image/")) {
-            setFilePreview(URL.createObjectURL(file));
-        } else {
-            setFilePreview(null);
-        }
-      } else {
-        toast({
-          variant: "destructive",
-          title: "Invalid File Type",
-          description: "Please upload an image or video file.",
-        });
-      }
+    if (file) processFile(file);
+  };
+
+  // Drag & Drop handlers
+  const onDragEnter = (e: React.DragEvent<HTMLElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter.current += 1;
+    setDragActive(true);
+  };
+
+  const onDragOver = (e: React.DragEvent<HTMLElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const onDragLeave = (e: React.DragEvent<HTMLElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter.current -= 1;
+    if (dragCounter.current <= 0) {
+      dragCounter.current = 0;
+      setDragActive(false);
     }
+  };
+
+  const onDrop = (e: React.DragEvent<HTMLElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter.current = 0;
+    setDragActive(false);
+
+    const file = e.dataTransfer.files?.[0];
+    if (file) processFile(file);
   };
 
   const clearFile = () => {
@@ -177,73 +217,119 @@ export default function FraudAnalyzer() {
                   <FormLabel className="font-bold">Image or Video Upload</FormLabel>
                   <FormControl>
                     <div className="relative">
-                        <input id="file-upload" type="file" className="hidden" onChange={handleFileChange} accept="image/*,video/*" />
-                        <label htmlFor="file-upload" className={cn(
-                            "flex flex-col items-center justify-center w-full h-48 border-2 border-dashed rounded-lg cursor-pointer hover:bg-card",
-                            "border-border text-muted-foreground"
-                        )}>
-                            <div className="flex flex-col items-center justify-center pt-5 pb-6">
-                                <Upload className="w-10 h-10 mb-3" />
-                                <p className="mb-2 text-sm"><span className="font-semibold">Click to upload</span> or drag and drop</p>
-                                <p className="text-xs">Image or Video (PNG, JPG, MP4, etc.)</p>
-                            </div>
-                        </label>
+                      <input
+                        id="file-upload"
+                        type="file"
+                        className="hidden"
+                        onChange={handleFileChange}
+                        accept="image/*,video/*"
+                      />
+                      <label
+                        htmlFor="file-upload"
+                        onDragEnter={onDragEnter}
+                        onDragOver={onDragOver}
+                        onDragLeave={onDragLeave}
+                        onDrop={onDrop}
+                        className={cn(
+                          "flex flex-col items-center justify-center w-full h-48 border-2 border-dashed rounded-lg cursor-pointer hover:bg-card",
+                          "border-border text-muted-foreground transition-colors",
+                          dragActive && "border-primary bg-primary/5"
+                        )}
+                      >
+                        <div className="flex flex-col items-center justify-center pt-5 pb-6">
+                          <Upload className="w-10 h-10 mb-3" />
+                          <p className="mb-2 text-sm">
+                            <span className="font-semibold">Click to upload</span> or drag and drop
+                          </p>
+                          <p className="text-xs">Image or Video (PNG, JPG, MP4, etc.)</p>
+                        </div>
+                      </label>
                     </div>
                   </FormControl>
                   <FormMessage />
                 </FormItem>
               )}
             />
-             {watchedFile && (
-                <div className="mt-4 relative w-fit mx-auto p-2 border rounded-lg bg-muted/50">
-                    {filePreview && <Image src={filePreview} alt="Preview" width={160} height={160} className="max-h-40 w-auto rounded-md" />}
-                    {!filePreview && <FileVideo className="h-20 w-20 text-muted-foreground" />}
-                    <div className="text-sm mt-2 text-center truncate max-w-xs">{watchedFile.name}</div>
-                    <Button variant="ghost" size="icon" className="absolute -top-3 -right-3 h-7 w-7 bg-card rounded-full" onClick={clearFile}>
-                        <X className="h-4 w-4" />
-                    </Button>
+
+            {watchedFile && (
+              <div className="mt-4 relative w-fit mx-auto p-2 border rounded-lg bg-muted/50">
+                {filePreview && (
+                  <Image
+                    src={filePreview}
+                    alt="Preview"
+                    width={160}
+                    height={160}
+                    className="max-h-40 w-auto rounded-md"
+                  />
+                )}
+                {!filePreview && <FileVideo className="h-20 w-20 text-muted-foreground" />}
+                <div className="text-sm mt-2 text-center truncate max-w-xs">
+                  {watchedFile.name}
                 </div>
-            )}
-            
-            {formState.errors.mediaFile && (
-                <Alert variant="destructive"><AlertCircle className="h-4 w-4" /><AlertDescription>{formState.errors.mediaFile.message}</AlertDescription></Alert>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="absolute -top-3 -right-3 h-7 w-7 bg-card rounded-full"
+                  onClick={clearFile}
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              </div>
             )}
 
+            {formState.errors.mediaFile && (
+              <Alert variant="destructive">
+                <AlertCircle className="h-4 w-4" />
+                <AlertDescription>{formState.errors.mediaFile.message}</AlertDescription>
+              </Alert>
+            )}
           </CardContent>
+
           <CardFooter>
-            <Button type="submit" disabled={analysisState.isLoading} className="w-full bg-accent hover:bg-accent/90 text-accent-foreground font-bold">
-              {analysisState.isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ShieldAlert className="mr-2 h-4 w-4" />}
+            <Button
+              type="submit"
+              disabled={analysisState.isLoading}
+              className="w-full bg-accent hover:bg-accent/90 text-accent-foreground font-bold"
+            >
+              {analysisState.isLoading ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <ShieldAlert className="mr-2 h-4 w-4" />
+              )}
               {t('Analyze for Fraud')}
             </Button>
           </CardFooter>
         </form>
       </Form>
-      
+
       {analysisState.isLoading && (
         <div className="p-6 border-t flex flex-col items-center justify-center gap-4 min-h-[200px]">
-            <Loader2 className="h-8 w-8 animate-spin text-primary" />
-            <p className="text-lg font-semibold text-foreground">AI Analysis in Progress...</p>
-            <p className="text-sm text-muted-foreground text-center">This may take a moment. Please don't close this page.</p>
+          <Loader2 className="h-8 w-8 animate-spin text-primary" />
+          <p className="text-lg font-semibold text-foreground">AI Analysis in Progress...</p>
+          <p className="text-sm text-muted-foreground text-center">
+            This may take a moment. Please don't close this page.
+          </p>
         </div>
       )}
 
       {analysisState.error && !analysisState.isLoading && (
         <div className="p-6 border-t">
-           <Alert variant="destructive">
-              <ShieldAlert className="h-4 w-4" />
-              <AlertTitle>Error During Analysis</AlertTitle>
-              <AlertDescription>{analysisState.error}</AlertDescription>
-            </Alert>
+          <Alert variant="destructive">
+            <ShieldAlert className="h-4 w-4" />
+            <AlertTitle>Error During Analysis</AlertTitle>
+            <AlertDescription>{analysisState.error}</AlertDescription>
+          </Alert>
         </div>
       )}
 
       {analysisState.finalReport && !analysisState.isLoading && (
         <div className="p-6 border-t bg-background/50">
-            <AnalysisReport 
-                report={analysisState.finalReport.report} 
-                confidenceScore={analysisState.finalReport.confidenceScore} 
-                analyzedUrl={analysisState.analyzedUrl}
-            />
+          <AnalysisReport
+            report={analysisState.finalReport.report}
+            confidenceScore={analysisState.finalReport.confidenceScore}
+            analyzedUrl={analysisState.analyzedUrl}
+          />
         </div>
       )}
     </Card>
